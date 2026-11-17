@@ -28,25 +28,6 @@ async function seal() {
 
 onMounted(load)
 
-/* align-25 */
-function alignHint(batch) {
-  if (!batch) return ''
-  const v = Number(batch.variance || 0)
-  const s = Number(batch.system_total || 0)
-  const d = Number(batch.declared_cash || 0)
-  return [s, d, v].join('/')
-}
-function alignRows(rows) {
-  return (rows || []).map(r => ({ ...r, align: alignHint(r) }))
-}
-
-/* fence-25 */
-
-function precheckView(p) {
-  if (!p) return {}
-  return { gate: p.gate_open, fp: p.fp_ok, bypass: p.bypass }
-}
-
 </script>
 
 <template>

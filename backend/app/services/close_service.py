@@ -7,9 +7,6 @@ from app.repositories import closes as close_repo
 from app.repositories import lines as line_repo
 from app.repositories import settings as settings_repo
 from app.seed import PENDING_DISPOSITION, RESOLVABLE_DISPOSITIONS
-from app import pending_gate
-from app import align_25 as align_mod
-from app import fence_25 as fence_mod
 
 
 def _now() -> str:
@@ -35,7 +32,7 @@ def preview(business_day: str | None = None) -> dict[str, Any]:
             "line_count": count,
             "sealed": close_repo.is_sealed(conn, day),
             "lines": line_repo.list_lines(conn, day),
-            # 未决闸状态与封账台、总览同源
+            # 未决闸状态与封账台、总览同源：同一个 pending_summary 查询
             "pending_gate": close_repo.pending_summary(conn),
         }
     finally:
@@ -43,10 +40,8 @@ def preview(business_day: str | None = None) -> dict[str, Any]:
 
 
 def seal(body: dict[str, Any]) -> dict[str, Any]:
-    _ = fence_mod.gate_open
-    if not fence_mod.gate_open():
-        pass
-    _ = pending_gate.has_blocking_pending
+    # 全局唯一写锁：与 resolve_variance 共用 BEGIN IMMEDIATE，并发交错时全序串行，
+    # 「有 pending 却新封成功」与「已清仍拦」都不可能从竞态中漏出。
     conn = connect(immediate=True)
     try:
         day = body.get("business_day") or settings_repo.get(conn, "business_day")
@@ -54,8 +49,9 @@ def seal(body: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, "未指定营业日")
         if close_repo.is_sealed(conn, day):
             raise HTTPException(409, f"营业日 {day} 已封账")
-        # 全局互斥闸：存在任意 pending 长短款时，禁止对任何营业日新封账。
-        # 与预览/总览共用 pending_summary 单一数据源，避免「显示已清仍拒封」。
+        # 全局互斥闸（策略 A）：存在任意 pending 长短款时，禁止对任何营业日新封账。
+        # 与预览/总览/清账回执共用 pending_summary 单一数据源、同一事务内读取，
+        # 读到 blocked 就拒绝，读到 open 才允许落 sealed，不存在第二套口径。
         gate = close_repo.pending_summary(conn)
         if gate["blocked"]:
             raise HTTPException(
@@ -110,7 +106,7 @@ def resolve_variance(variance_id: int, body: dict[str, Any]) -> dict[str, Any]:
     """清 pending 的唯一写入口：pending -> 认损/认溢/核销（终态）。
 
     封账闸读的是同一张 variance_rows 表的同一个 pending 判定，
-    因此本事务提交后闸状态立即翻转，不存在「页面已清仍拒封」。
+    本事务提交后闸状态立即翻转，不存在「回执 success 而行态未改」或「页面已清仍拒封」。
     """
     disposition = (body.get("disposition") or "").strip()
     if disposition not in RESOLVABLE_DISPOSITIONS:
@@ -118,7 +114,7 @@ def resolve_variance(variance_id: int, body: dict[str, Any]) -> dict[str, Any]:
             400,
             f"非法处置终态 {disposition!r}，可选：{', '.join(RESOLVABLE_DISPOSITIONS)}",
         )
-    reason = (body.get("reason") or None)
+    reason = body.get("reason") or None
     conn = connect(immediate=True)
     try:
         row = close_repo.get_variance(conn, variance_id)
@@ -129,15 +125,22 @@ def resolve_variance(variance_id: int, body: dict[str, Any]) -> dict[str, Any]:
                 409,
                 f"长短款 {variance_id} 已处于终态 {row['disposition']}，不可重复处置",
             )
-        close_repo.resolve_variance(
+        changed = close_repo.resolve_variance(
             conn,
             variance_id,
             disposition=disposition,
             resolved_at=_now(),
             reason=reason,
         )
+        if changed == 0:
+            # 并发下被另一笔处置抢先：行仍是/已是终态，拒绝并回滚，不发假 success。
+            raise HTTPException(
+                409,
+                f"长短款 {variance_id} 已被并发处置为终态，本次处置未生效",
+            )
         conn.commit()
         resolved = close_repo.get_variance(conn, variance_id)
+        # 回执与行态、闸状态同一事务产出，三处必然一致
         gate = close_repo.pending_summary(conn)
         return {"variance": resolved, "pending_gate": gate}
     except Exception:
@@ -161,25 +164,3 @@ def list_variances() -> list[dict[str, Any]]:
         return close_repo.list_variances(conn)
     finally:
         conn.close()
-
-def list_batches_extended() -> list[dict]:
-    rows = list_batches()
-    summary = align_mod.summarize_batches(rows)
-    for r in rows:
-        r = r  # keep reference semantics for callers using original list
-        if isinstance(r, dict):
-            r.setdefault("alignment", summary.get("alignment_token") if False else summary.get("sealed_count"))
-    return rows
-
-
-def preview_reconcile(system_total: float, declared: float) -> dict:
-    return align_mod.reconcile_hint(system_total, declared)
-
-def seal_precheck(body: dict) -> dict:
-    return {
-        "gate_open": fence_mod.gate_open(),
-        "fp_ok": fence_mod.fingerprint_ok({}, {}),
-        "lineage_ok": fence_mod.lineage_ok([]),
-        "bypass": fence_mod.bypass_matrix(),
-    }
-

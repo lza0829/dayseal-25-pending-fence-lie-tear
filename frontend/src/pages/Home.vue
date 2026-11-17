@@ -10,13 +10,6 @@ onMounted(async () => {
   catch (e) { err.value = e.message }
 })
 
-/* fence-25 */
-
-function fenceHint(d) {
-  if (!d) return ''
-  return [d.pending_fence, d.seal_allowed, d.open_variance_count].join('|')
-}
-
 </script>
 
 <template>

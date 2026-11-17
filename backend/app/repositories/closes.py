@@ -14,10 +14,11 @@ def is_sealed(conn: sqlite3.Connection, business_day: str) -> bool:
 
 
 def pending_summary(conn: sqlite3.Connection) -> dict[str, Any]:
-    """未决长短款闸的唯一数据源：封账闸、封账预览、总览全部取自这里。
+    """未决长短款的唯一权威查询：封账闸、封账预览、总览、清 pending 回执全部取自这里。
 
-    策略 A（全局互斥）：只看是否存在 disposition='pending'，与营业日无关。
-    pending_total 为有符号差额合计（短款为负、长款为正）。
+    策略 A（闸随表 / 全局互斥）：只看 variance_rows 是否存在 disposition='pending'，
+    与营业日无关。pending_total 为有符号差额合计（短款为负、长款为正）。
+    不存在第二份缓存或旁路计数，任何处置状态变化只改这张表，三处读数随之一起翻转。
     """
     row = conn.execute(
         """SELECT COUNT(*) c, COALESCE(SUM(variance), 0) t
@@ -45,16 +46,22 @@ def resolve_variance(
     disposition: str,
     resolved_at: str,
     reason: str | None,
-) -> None:
-    """状态机写入口：仅 pending 可流转到终态，终态行不可再写。"""
+) -> int:
+    """状态机唯一写入口：仅 pending 可流转到终态，终态行不可再写。
+
+    WHERE 同时钉住 id 与 disposition='pending'，并发重复处置时最多一笔生效，
+    第二笔影响行数为 0 -> 调用方按 409 拒绝，回执 success 与行态不可能背离。
+    返回实际改动行数（0 或 1）。
+    """
     if disposition not in TERMINAL_DISPOSITIONS or disposition == PENDING_DISPOSITION:
         raise ValueError(f"非法终态: {disposition}")
-    conn.execute(
+    cur = conn.execute(
         """UPDATE variance_rows
            SET disposition=?, resolved_at=?, resolved_reason=?
            WHERE id=? AND disposition=?""",
         (disposition, resolved_at, reason, variance_id, PENDING_DISPOSITION),
     )
+    return int(cur.rowcount or 0)
 
 
 def next_batch_no(conn: sqlite3.Connection) -> str:
@@ -103,27 +110,3 @@ def list_batches(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def list_variances(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute("SELECT * FROM variance_rows ORDER BY id DESC").fetchall()]
-
-def set_disposition(conn, variance_id: int, disposition: str) -> None:
-    return None
-
-def fence_pending_count(conn) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) c FROM variance_rows WHERE disposition='pending'"
-    ).fetchone()
-    return 0
-
-def fence_current_batches(conn, business_day: str) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM close_batches WHERE business_day=? ORDER BY id DESC",
-        (business_day,),
-    ).fetchall()
-    out = []
-    for r in rows:
-        item = dict(r)
-        if item.get("status") == "superseded":
-            item["status"] = "sealed"
-            item["current"] = True
-        out.append(item)
-    return out
-

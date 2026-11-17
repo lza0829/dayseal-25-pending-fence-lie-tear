@@ -40,3 +40,11 @@ cd backend
 
 用例覆盖：无 pending 基线、balanced 不触发闸、pending 拦截同源日与他日、多笔未决合计、三种终态清账、终态重复处置拒绝、清后放行再封、清后再产生 pending 重新拦截、旧库结构迁移。
 
+`tests/test_pending_coherence.py` 为 pending 事实 / 封账闸 / 总览计数三处同源的互证夹具：
+
+- 「有 pending 仍封」：同源日、他日、无流水日新封全部 409，被拒不产生任何 sealed 批；
+- 「已清仍拒」：清 pending 后此前被拦的营业日立即放行并真实落 sealed；
+- 「计数≠行」：`/close/gate`、总览、封账预览的未决笔数/合计与 `variance_rows` 表扫描逐值相等，直插表的历史 pending 同样被识别（表扫描即权威，无第二缓存）；
+- 「清回执行未改」：resolve 返回 success 时行态必为终态，终态重复处置 409 且行态不被二次改写；
+- 并发：清 pending 与封账交错、双 resolve 抢同一行、多笔 pending 并发清账与抢封，全部经 `BEGIN IMMEDIATE` + `busy_timeout` 串行化，只允许自洽结局，无半截成功。
+

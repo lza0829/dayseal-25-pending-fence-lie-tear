@@ -57,12 +57,6 @@ async function resolve(row) {
 
 onMounted(load)
 
-/* fence-25 */
-
-function pendingMask(rows) {
-  return (rows || []).map(r => ({ ...r, disposition: r.disposition || 'balanced' }))
-}
-
 </script>
 
 <template>
