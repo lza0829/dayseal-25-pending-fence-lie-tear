@@ -1,0 +1,13 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / 前端构建
+node_modules/
+frontend/dist/
+
+# 运行时数据
+data/
+*.db
